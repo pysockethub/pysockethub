@@ -40,7 +40,10 @@ class ColorFormatter(logging.Formatter):
     If color name isn't found, color is ignored.
     """
     def format(self, record):
-        fmtd_msg = record.msg % record.args
+        try:
+            fmtd_msg = record.msg % record.args
+        except Exception:
+            fmtd_msg = repr(record.msg)
 
         if record.color:
             color_info = record.color.split(':')
