@@ -48,11 +48,13 @@ todo:
     - mention socat in docs (http://www.dest-unreach.org/socat/)
     - colored log messages
     - option to suppress color
+    - add .reg file for windows users
 
 """
 
 # System imports
 import argparse
+import collections
 import datetime
 import logging
 import platform
@@ -63,7 +65,11 @@ import sys
 import threading
 import time
 
+# Third-party imports
+import hexdump
+
 # Local imports
+import ansicolor
 import colorlog
 
 # Globals
@@ -72,6 +78,8 @@ AUTO_RECONNECT_DEFAULT = True
 LOCK = threading.Lock()  # Protects access to socket lists between threads
 LOG_LEVEL = logging.DEBUG
 
+PALETTE = ['DEEP_SKY_BLUE_1', 'DARK_ORANGE', 'LIGHT_YELLOW', 'LIGHT_RED',
+           'GREEN_1', 'PLUM_2']
 
 def setup_log():
     global log
@@ -91,7 +99,7 @@ def validate_port(arg):
         port = int(arg)
     except ValueError:
         msg = f'ERROR: Port must be a number (got {repr(arg)})'
-        print(msg)
+        log.error('Port must be a number (got %s)', repr(arg))
         sys.exit(1)
     return port
 
@@ -102,9 +110,8 @@ def validate_listen_arg(arg):
     arg_parts = arg.split(':')
 
     if len(arg_parts) < 2:
-        msg = "ERROR: Please specify listen arg in format host:port[:max_connections]."
-        msg += f"  (got: {arg})"
-        print(msg)
+        msg = "Please specify listen arg in format host:port[:max_connections].  (got: %s)"
+        log.error(msg, arg)
         sys.exit(1)
 
     host = arg_parts[0]
@@ -113,15 +120,15 @@ def validate_listen_arg(arg):
 
     if len(arg_parts) > 2:
         # User specified max_connections
-        msg = f'ERROR: max_connections be a positive number (got {repr(arg_parts[2])})'
+        msg = 'max_connections be a positive number (got %s)'
         try:
             max_connections = int(arg_parts[2])
         except ValueError:
-            print(msg)
+            log.error(msg, repr(arg_parts[2]))
             sys.exit(1)
 
         if max_connections < 1:
-            print(msg)
+            log.error(msg, repr(arg_parts[2]))
             sys.exit(1)
 
     else:
@@ -139,9 +146,8 @@ def validate_remote_arg(arg):
     arg_parts = arg.split(':')
 
     if len(arg_parts) < 2:
-        msg = "ERROR: Please specify remote arg in format host:port[:auto_reconnect]."
-        msg += f"  (got: {arg})"
-        print(msg)
+        msg = "Please specify remote arg in format host:port[:auto_reconnect]. (got %s)"
+        log.error(msg, arg)
         sys.exit(1)
 
     host = arg_parts[0]
@@ -176,15 +182,15 @@ class Listener:
             sock.close()
 
     def _create_listen_socket(self):
-        # print("_create_listen_socket")
+        # log.debug("_create_listen_socket")
         # Create a listen socket and remember the maximum number connections
         # it supports.
         self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.listen_socket.bind((self.host, self.port))
         except OSError as exc:
-            msg = f"ERROR: Couldn't bind to {self.host}:{self.port} ({str(exc)})"
-            print(msg)
+            msg = "Couldn't bind to %s:%d (%s)"
+            log.error(msg, self.host, self.port, str(exc))
             sys.exit(1)
 
         self.listen_socket.listen()
@@ -215,7 +221,7 @@ class Listener:
             # Accept incoming connection
             connected_socket, addr = sock.accept()
             self.connected_sockets.append(connected_socket)
-            print(f'Accepted connection from: {addr}')
+            log.info('Accepted connection from: %s', addr)
             # listen_sockets_connections[sock].append(connected_socket)
 
             # Check to see if the maximum number of connections has
@@ -228,7 +234,7 @@ class Listener:
                 # listen socket and re-key its associated dicts once a slot
                 # opens up.
                 msg = "Maximum connections (%d) reached on port %d"
-                print(msg % (self.max_connections, self.port))
+                log.info(msg, self.max_connections, self.port)
                 sock.close()
                 self.listen_socket = None
 
@@ -248,7 +254,7 @@ class Listener:
                 # is closed.  Mark this socket for removal from the sockets
                 # list.
                 addr, port = sock.getpeername()
-                print("Client disconnected (%s:%d)" % (addr, port))
+                log.info("Client disconnected (%s:%d)", addr, port)
                 self._remove_connected_socket(sock)
 
         return data
@@ -257,7 +263,8 @@ class Listener:
         self.connected_sockets.remove(sock)
         # Re-open the listen socket if it had previously been closed due to
         # max connections.
-        if len(self.connected_sockets) < self.max_connections:
+        if self.listen_socket is None:
+        # if len(self.connected_sockets) < self.max_connections:
             self._create_listen_socket()
 
     def distribute(self, data):
@@ -304,18 +311,18 @@ class Caller:
             except socket.timeout as exc:
                 sock.close()
                 del sock
-                print('timeout', str(exc))
+                log.debug('timeout %s', str(exc))
                 # time.sleep(1)
                 continue
             except OSError as exc:
                 sock.close()
                 del sock
-                print('OSError', str(exc), repr(self.host), repr(self.port))
+                log.debug('OSError %s %s %s', str(exc), repr(self.host), repr(self.port))
                 # time.sleep(1)
                 continue
 
             self.sockets.append(sock)
-            print("Connected to %s:%d" % (self.host, self.port))
+            log.info("Connected to %s:%d", self.host, self.port)
             break
 
     def _connect(self):
@@ -347,7 +354,7 @@ class Caller:
             # if platform.system() == 'Windows':
             #     if exc.winerror is not None:
             addr, port = sock.getpeername()
-            print("Client disconnected (exc) (%s:%d) (%s)" % (addr, port, str(exc)))
+            log.info("Client disconnected (exc) (%s:%d) (%s)", addr, port, str(exc))
             sock.close()
             self.sockets.remove(sock)
 
@@ -361,7 +368,7 @@ class Caller:
             # When recv() returns None or b'', that means the connection is
             # closed.  Mark this socket for removal from the sockets list.
             addr, port = sock.getpeername()
-            print("Client disconnected (%s:%d)" % (addr, port))
+            log.info("Client disconnected (%s:%d)", addr, port)
             sock.close()
             self.sockets.remove(sock)
             if self.auto_reconnect:
@@ -376,15 +383,95 @@ class Caller:
                 self.sockets[0].send(data)
         self.last_readable = None
 
+class HexdumpLogger:
+    def __init__(self, args):
+        self.sock_to_color_map = {}
+        self.args = args
+        self.enabled = args.logfmt == 'hexdump'
+
+    def log(self, data, sock):
+        if not self.enabled:
+            return
+        try:
+            color = self.sock_to_color_map[sock]
+        except KeyError:
+            color = PALETTE[len(self.sock_to_color_map) % len(PALETTE)]
+            self.sock_to_color_map[sock] = color
+
+        hdump = hexdump.hexdump(data, result='return')
+        hdump = getattr(ansicolor.fore, color) + hdump + ansicolor.style.RESET
+        addr, port = sock.getpeername()
+        log.info("Received %d bytes from %s:%d:\n%s",
+                 len(data), addr, port, hdump)
+
+class TableLogger:
+    def __init__(self, args):
+        self.sock_to_color_map = {}
+        self.sock_rx_bytes = collections.defaultdict(int)
+        self.args = args
+        self.last_dt = datetime.datetime(1900, 1, 1, 0, 0, 0)
+        self.max_dt = datetime.timedelta(seconds=1)
+        self.enabled = args.logfmt == 'table'
+
+    def log(self, data, sock):
+        if not self.enabled:
+            return
+
+        self.sock_rx_bytes[sock] += len(data)
+
+
+    def show(self, sockets):
+        if not self.enabled:
+            return
+        now = datetime.datetime.now()
+        if not (now - self.last_dt) > self.max_dt:
+            return
+
+        self.last_dt = now
+
+        lines = []
+        # all_socks = list(set(sockets + list(self.sock_rx_bytes.keys())))
+        # for sock in all_socks:
+        for sock in sockets:
+        # for sock, rx_bytes in self.sock_rx_bytes.items():
+            try:
+                rx_bytes = self.sock_rx_bytes[sock]
+            except KeyError:
+                rx_bytes = 0
+
+            connected = sock in sockets
+
+            try:
+                addr, port = sock.getpeername()
+            except OSError:
+                continue
+
+            try:
+                color = self.sock_to_color_map[sock]
+            except KeyError:
+                color = PALETTE[len(self.sock_to_color_map) % len(PALETTE)]
+                self.sock_to_color_map[sock] = color
+
+            line = f'{getattr(ansicolor.fore, color)}{addr}:{port}\t{rx_bytes}\t{connected}{ansicolor.style.RESET}'
+            lines.append(line)
+
+        if lines:
+            log.info('%s', '\n' + "\n".join(lines))
+        else:
+            log.info("Awaiting connections...")
+
+
 def main(args):
-    print(args)
+    hex_logger = HexdumpLogger(args)
+    table_logger = TableLogger(args)
 
     listeners = []
     for arg in args.listen:
         listen_host, listen_port, max_connections = validate_listen_arg(arg)
         listener = Listener(listen_host, listen_port, max_connections)
         listeners.append(listener)
-        print(f"Listening on {listen_host}:{listen_port} (max_connections:{max_connections})")
+        log.info("Listening on %s:%d (max_connections:%d)",
+                 listen_host, listen_port, max_connections)
 
     callers = []
     for arg in args.remote:
@@ -392,9 +479,9 @@ def main(args):
         caller = Caller(host, port, auto_reconnect)
         callers.append(caller)
         msg = "Establishing outbound connection to %s:%d (auto_reconnect:%s)"
-        print(msg % (host, port, auto_reconnect))
+        log.info(msg, host, port, auto_reconnect)
 
-    print("Hub running.  Press ^C to exit.")
+    log.info("Hub running.  Press ^C to exit.")
     keep_running = True
     select_timeout = .1
     try:
@@ -405,7 +492,7 @@ def main(args):
             select_sockets += flatten([c.sockets for c in callers])
             if not select_sockets:
                 time.sleep(select_timeout)
-                print('continue')
+                log.debug('continue')
                 continue
 
             rlist, _wlist, _xlist = select.select(select_sockets,
@@ -424,10 +511,13 @@ def main(args):
                     for item in listeners + callers:
                         item.distribute(data)
 
-            # print(datetime.datetime.now(), rlist, _wlist, _xlist)
+                    hex_logger.log(data, sock)
+                    table_logger.log(data, sock)
+
+            table_logger.show(select_sockets)
 
     except KeyboardInterrupt:
-        # FIXME: clean up before exit?
+        # Shut down socket connections and threads
         for item in callers + listeners:
             item.shutdown()
 
@@ -455,6 +545,9 @@ def parse_args():
     parser.add_argument("-g", "--log", default='False',
                        help="Enable logging to disk")
 
+    parser.add_argument("--logfmt", default='hexdump', choices=['hexdump', 'table'],
+                       help="On-screen log format.")
+
     parser.add_argument("-c", "--color", default='True',
                         help="Enable colored output")
 
@@ -467,8 +560,5 @@ def parse_args():
     return args
 
 if __name__ == '__main__':
-
-    log.debug("problems: %d", 3, color='RED:WHITE:REVERSE')
-
     args = parse_args()
     main(args)
