@@ -5,6 +5,11 @@ Example usage:
     >>> from ansicolor import fore, back, style
     >>> print(fore.LIGHT_BLUE + back.RED + style.BOLD + "Hello World !!!" + style.RESET)
 
+Show color palette:
+    >>> import ansicolor
+    >>> for i, color in enumerate(ansicolor.colors):
+    >>>     print(getattr(ansicolor.fore, color), i, color, ansicolor.style.RESET)
+
 WINDOWS USERS:  You must enable ANSI color in the Windows console:
     1. Run regedit.exe
     2. Add a DWORD to HKEY_CURRENT_USER\Console:
@@ -827,3 +832,6 @@ class style:
     RES_REVERSE = '\x1b[27m'
     RES_HIDDEN = '\x1b[28m'
     
+def show_colors():
+    for i, color in enumerate(colors):
+        print(getattr(fore, color), i, color, style.RESET)
