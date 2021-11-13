@@ -46,12 +46,15 @@ todo:
     - logo
     - default startup: --listen localhost:1234:10?
     - mention socat in docs (http://www.dest-unreach.org/socat/)
+    - colored log messages
+    - option to suppress color
 
 """
 
 # System imports
 import argparse
 import datetime
+import logging
 import platform
 import queue
 import select
@@ -60,11 +63,27 @@ import sys
 import threading
 import time
 
+# Local imports
+import colorlog
+
 # Globals
 MAX_CONNECTIONS_DEFAULT = 10
 AUTO_RECONNECT_DEFAULT = True
 LOCK = threading.Lock()  # Protects access to socket lists between threads
+LOG_LEVEL = logging.DEBUG
 
+
+def setup_log():
+    global log
+    logging.setLoggerClass(colorlog.ColorLog)
+    log = logging.getLogger(__name__)
+    log_handler = logging.StreamHandler()
+    log_formatter = colorlog.ColorFormatter()
+    log_handler.setFormatter(log_formatter)
+    log.addHandler(log_handler)
+    log.setLevel(LOG_LEVEL)
+
+setup_log()
 
 # Code
 def validate_port(arg):
@@ -76,6 +95,8 @@ def validate_port(arg):
         sys.exit(1)
     return port
 
+def validate_bool(arg):
+    return arg.lower() in ['true', '1']
 
 def validate_listen_arg(arg):
     arg_parts = arg.split(':')
@@ -131,7 +152,7 @@ def validate_remote_arg(arg):
         # User specified auto_reconnect
         msg = f'ERROR: auto_reconnect be a positive number (got {repr(arg_parts[2])})'
 
-        auto_reconnect = arg_parts[2].lower() in ['true', '1']
+        auto_reconnect = validate_bool(arg_parts[2])
 
     else:
         # auto_reconnect not specified; use default
@@ -418,23 +439,36 @@ def parse_args():
                                      # )
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument("-l", "--listen", action='append', default=[],
-                        help="Local interface and port to listen on.  host:port[:max_connections]")
+    # Create a group so that we can require at least one --listen or --remote arg
+    group = parser.add_mutually_exclusive_group(required=True)
 
-    remote_help = "Remote host to call.  host:port[:auto_reconnect] auto_reconnect:0/1 or True/False"
-    remote_help += "  Option may be specified multiple times."
-    parser.add_argument("-r", "--remote", action='append', default=[],
-                        help=remote_help)
+    help_msg = "Local interface and port to listen on.  host:port[:max_connections]."
+    help_msg += "  Option may be specified multiple times."
+    group.add_argument("-l", "--listen", action='append', default=[],
+                       help=help_msg)
 
-    parser.add_argument("-g", "--log", action="store_true",
+    help_msg = "Remote host to call.  host:port[:auto_reconnect] auto_reconnect:true/false."
+    help_msg += "  Option may be specified multiple times."
+    group.add_argument("-r", "--remote", action='append', default=[],
+                       help=help_msg)
+
+    parser.add_argument("-g", "--log", default='False',
                        help="Enable logging to disk")
 
-    return parser.parse_args()
+    parser.add_argument("-c", "--color", default='True',
+                        help="Enable colored output")
+
+    args = parser.parse_args()
+
+    # Convert the bool arg strings to bool
+    args.log = validate_bool(args.log)
+    args.color = validate_bool(args.color)
+
+    return args
 
 if __name__ == '__main__':
+
+    log.debug("problems: %d", 3, color='RED:WHITE:REVERSE')
+
     args = parse_args()
-    if not (args.listen or args.remote):
-        msg = "ERROR: You must specify at least one --listen or --remote option."
-        print(msg)
-        sys.exit(1)
     main(args)
