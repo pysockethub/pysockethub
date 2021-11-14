@@ -4,10 +4,10 @@ Features:
     x Option to specify host:port[:max_connections] to listen on.
         x max_connections limits how many connections on a port.  Default is 10.
         x Multiple listen ports are supported by duplicating the cmd line option.
-    - Option to specify host:port[:auto_reconnect] to make outgoing connection to.
+    x Option to specify host:port[:auto_reconnect] to make outgoing connection to.
         x Multiple outgoing connections are supported.
         x auto_reconnect will attempt to reconnect on a disconnection
-        - Option for reconnect delay - adaptive vs. fixed
+        x Option for reconnect delay - adaptive vs. fixed
     - Option to enable logging
         Multiple formats are supported:
             raw: binary, all data as it arrives goes into a file
@@ -29,7 +29,7 @@ tests:
 
 todo:
     x colored log messages
-    - option to suppress color
+    x option to suppress color
     - rename on-screen logging to something else (logging = to disk)
     - rename client / server -> client / server?
     - add logging
@@ -282,7 +282,7 @@ class SocketClient:
         self.host = host
         self.port = port
         self.auto_reconnect = auto_reconnect
-        self.sockets = []  # Holds zero or one sockets
+        self.sockets = []  # Holds one socket when connected; otherwise empty.
         self.last_readable = None
         self.thread = None
         self.keep_running = True
@@ -291,23 +291,28 @@ class SocketClient:
     def _do_connect(self):
         # Create the socket and try to connect
 
+        connect_attempts = 1
         while self.keep_running:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
+
+            # Initially retry quickly (10Hz), then back off (1/10Hz).  Note
+            # that connect() may timeout sooner than the specified timeout
+            # (e.g. after 2 seconds, despite the timeout being set to 10
+            # seconds).  An additional delay could be added to strictly limit
+            # the rate of connect() attempts.
+            timeout = min(10, (.1 * connect_attempts))
+            sock.settimeout(timeout)
+            connect_attempts += 1
 
             try:
                 sock.connect((self.host, self.port))
-            except socket.timeout as exc:
+            except socket.timeout:
                 sock.close()
                 del sock
-                log.debug('timeout %s', str(exc))
-                # time.sleep(1)
                 continue
-            except OSError as exc:
+            except OSError:
                 sock.close()
                 del sock
-                log.debug('OSError %s %s %s', str(exc), repr(self.host), repr(self.port))
-                # time.sleep(1)
                 continue
 
             self.sockets.append(sock)
@@ -317,8 +322,8 @@ class SocketClient:
     def _connect(self):
         # daemon=True allows ^C to shut down the application during connect
         # (), but may leave a stale connection hanging around.
-        # self.thread = threading.Thread(target=self._do_connect, daemon=True)
-        self.thread = threading.Thread(target=self._do_connect)
+        self.thread = threading.Thread(target=self._do_connect, daemon=True)
+        # self.thread = threading.Thread(target=self._do_connect)
         self.thread.start()
 
     def shutdown(self):
@@ -372,13 +377,13 @@ class SocketClient:
                 self.sockets[0].send(data)
         self.last_readable = None
 
-class HexdumpLogger:
+class HexdumpPrinter:
     def __init__(self, args):
         self.sock_to_color_map = {}
         self.args = args
-        self.enabled = args.logfmt == 'hexdump'
+        self.enabled = args.statusfmt == 'hexdump'
 
-    def log(self, data, sock):
+    def update(self, data, sock):
         if not self.enabled:
             return
         try:
@@ -388,21 +393,22 @@ class HexdumpLogger:
             self.sock_to_color_map[sock] = color
 
         hdump = hexdump.hexdump(data, result='return')
-        hdump = getattr(ansicolor.fore, color) + hdump + ansicolor.style.RESET
+        if self.args.color:
+            hdump = getattr(ansicolor.fore, color) + hdump + ansicolor.style.RESET
         addr, port = sock.getpeername()
         log.info("Received %d bytes from %s:%d:\n%s",
                  len(data), addr, port, hdump)
 
-class TableLogger:
+class TablePrinter:
     def __init__(self, args):
         self.sock_to_color_map = {}
         self.sock_rx_bytes = collections.defaultdict(int)
         self.args = args
         self.last_dt = datetime.datetime(1900, 1, 1, 0, 0, 0)
         self.max_dt = datetime.timedelta(seconds=1)
-        self.enabled = args.logfmt == 'table'
+        self.enabled = args.statusfmt == 'table'
 
-    def log(self, data, sock):
+    def update(self, data, sock):
         if not self.enabled:
             return
 
@@ -441,7 +447,10 @@ class TableLogger:
                 color = PALETTE[len(self.sock_to_color_map) % len(PALETTE)]
                 self.sock_to_color_map[sock] = color
 
-            line = f'{getattr(ansicolor.fore, color)}{addr}:{port}\t{rx_bytes}\t{connected}{ansicolor.style.RESET}'
+            if self.args.color:
+                line = f'{getattr(ansicolor.fore, color)}{addr}:{port}\t{rx_bytes}\t{connected}{ansicolor.style.RESET}'
+            else:
+                line = f'{addr}:{port}\t{rx_bytes}\t{connected}'
             lines.append(line)
 
         if lines:
@@ -451,23 +460,23 @@ class TableLogger:
 
 
 def main(args):
-    hex_logger = HexdumpLogger(args)
-    table_logger = TableLogger(args)
+    hex_printer = HexdumpPrinter(args)
+    table_printer = TablePrinter(args)
 
     servers = []
-    for arg in args.listen:
+    for arg in args.serve:
         listen_host, listen_port, max_connections = validate_listen_arg(arg)
         server = SocketServer(listen_host, listen_port, max_connections)
         servers.append(server)
-        log.info("Listening on %s:%d (max_connections:%d)",
+        log.info("Serving on %s:%d (max_connections:%d)",
                  listen_host, listen_port, max_connections)
 
     clients = []
-    for arg in args.remote:
+    for arg in args.client:
         host, port, auto_reconnect = validate_remote_arg(arg)
         client = SocketClient(host, port, auto_reconnect)
         clients.append(client)
-        msg = "Establishing outbound connection to %s:%d (auto_reconnect:%s)"
+        msg = "Connecting to %s:%d (auto_reconnect:%s)"
         log.info(msg, host, port, auto_reconnect)
 
     log.info("Hub running.  Press ^C to exit.")
@@ -481,7 +490,6 @@ def main(args):
             select_sockets += flatten([c.sockets for c in clients])
             if not select_sockets:
                 time.sleep(select_timeout)
-                log.debug('continue')
                 continue
 
             rlist, _wlist, _xlist = select.select(select_sockets,
@@ -500,10 +508,10 @@ def main(args):
                     for item in servers + clients:
                         item.distribute(data)
 
-                    hex_logger.log(data, sock)
-                    table_logger.log(data, sock)
+                    hex_printer.update(data, sock)
+                    table_printer.update(data, sock)
 
-            table_logger.show(select_sockets)
+            table_printer.show(select_sockets)
 
     except KeyboardInterrupt:
         # Shut down socket connections and threads
@@ -521,29 +529,29 @@ def parse_args():
     # Create a group so that we can require at least one --listen or --remote arg
     group = parser.add_mutually_exclusive_group(required=True)
 
-    help_msg = "Local interface and port to listen on.  host:port[:max_connections]."
+    help_msg = "Local interface and port to serve connections on.  host:port[:max_connections]."
     help_msg += "  Option may be specified multiple times."
-    group.add_argument("-l", "--listen", action='append', default=[],
+    group.add_argument("-s", "--serve", action='append', default=[],
                        help=help_msg)
 
-    help_msg = "Remote host to call.  host:port[:auto_reconnect] auto_reconnect:true/false."
+    help_msg = "Remote host to connect to.  host:port[:auto_reconnect] auto_reconnect:true/false."
     help_msg += "  Option may be specified multiple times."
-    group.add_argument("-r", "--remote", action='append', default=[],
+    group.add_argument("-c", "--client", action='append', default=[],
                        help=help_msg)
 
-    parser.add_argument("-g", "--log", default='False',
-                       help="Enable logging to disk")
+    parser.add_argument("--status", default='True',
+                       help="Display status messages during program operation.")
 
-    parser.add_argument("--logfmt", default='hexdump', choices=['hexdump', 'table'],
-                       help="On-screen log format.")
+    parser.add_argument("--statusfmt", default='table', choices=['hexdump', 'table'],
+                       help="Specifies format of status messages.")
 
-    parser.add_argument("-c", "--color", default='True',
+    parser.add_argument("--color", default='True',
                         help="Enable colored output")
 
     args = parser.parse_args()
 
     # Convert the bool arg strings to bool
-    args.log = validate_bool(args.log)
+    args.log = validate_bool(args.status)
     args.color = validate_bool(args.color)
 
     return args
