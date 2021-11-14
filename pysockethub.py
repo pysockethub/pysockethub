@@ -12,8 +12,8 @@ Features:
         Multiple formats are supported:
             raw: binary, all data as it arrives goes into a file
             frames: binary, but has a frame with some header information indicating the source of the data
-            hex: similar to frames to header is in readable ascii and data is in hex
-            ptp: PTP telemetry format
+            hex: similar to frames but header is in readable ascii and data is in hex
+            plugin: calls user-supplied function (specify plugin module name on cmdline)
     - Option to enable debug output to screen with hex or ascii + timestamps
     - Option to output summary stats table at fixed rate or on activity (with rate limiting)
     - Option to restrict incoming connections by IP range (whitelist / blacklist)
@@ -28,16 +28,13 @@ tests:
     - hostnames vs. IPs (particularly in the binary loggers that include this info)
 
 todo:
-    x colored log messages
-    x option to suppress color
-    - rename on-screen logging to something else (logging = to disk)
-    - rename client / server -> client / server?
-    - add logging
+    - add logging to file
     - docstrings
     - diagrams
     - logo
-    - mention socat in docs (http://www.dest-unreach.org/socat/)
+    - mention socat / netcat in docs (http://www.dest-unreach.org/socat/)
     - add .reg file for windows users
+    - ability to make some connections recv only (don't accept any data from the remote side)
 
 """
 
@@ -458,6 +455,34 @@ class TablePrinter:
         else:
             log.info("Awaiting connections...")
 
+class BinLogger:
+    """
+    Logger that writes bytes straight to disk as they arrive.
+    No additional metadata is stored in the file.
+    """
+    def __init__(self, outfilename):
+        self.outfilename = outfilename
+        self.logfile = None
+
+    def log(self, sock, data):
+        if self.logfile is None:
+            self.logfile = open(self.outfilename, 'wb')
+
+        self.logfile.write(data)
+
+class BinFrameLogger:
+    """
+    Logger that writes bytes
+    """
+    def __init__(self, outfilename):
+        self.outfilename = outfilename
+        self.logfile = None
+
+    def log(self, sock, data):
+        if self.logfile is None:
+            self.logfile = open(self.outfilename, 'wb')
+
+        self.logfile.write(data)
 
 def main(args):
     hex_printer = HexdumpPrinter(args)
