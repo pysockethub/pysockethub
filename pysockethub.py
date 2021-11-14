@@ -24,30 +24,19 @@ Features:
 
 tests:
     - What happens when remote end doesn't recv
-    - Correctly handle loopback (not allowed) - caller <-> listener = error
-    - max allowed socket connections on a system? 32k?
+    - Correctly handle loopback (not allowed) - client <-> server = error
     - hostnames vs. IPs (particularly in the binary loggers that include this info)
 
-What approach to use when implementing max_connections:
-    x Could stop listening when max reached (did this)
-    - Could listen but never accept
-    - Could accept, then immediately close
-
-Need mutex to protect socket access between threads.
-
-    x Convinced myself that it's not needed because the two threads use
-    Caller.sockets in a mutually-compatible way.
-
 todo:
-    - rename caller / listener -> client / server?
-    - use logging
+    x colored log messages
+    - option to suppress color
+    - rename on-screen logging to something else (logging = to disk)
+    - rename client / server -> client / server?
+    - add logging
     - docstrings
     - diagrams
     - logo
-    - default startup: --listen localhost:1234:10?
     - mention socat in docs (http://www.dest-unreach.org/socat/)
-    - colored log messages
-    - option to suppress color
     - add .reg file for windows users
 
 """
@@ -167,7 +156,7 @@ def validate_remote_arg(arg):
     return host, port, auto_reconnect
 
 
-class Listener:
+class SocketServer:
     def __init__(self, host, port, max_connections):
         self.host = host
         self.port = port
@@ -288,7 +277,7 @@ def flatten(lst):
     """
     return [item for sublist in lst for item in sublist]
 
-class Caller:
+class SocketClient:
     def __init__(self, host, port, auto_reconnect=True):
         self.host = host
         self.port = port
@@ -465,19 +454,19 @@ def main(args):
     hex_logger = HexdumpLogger(args)
     table_logger = TableLogger(args)
 
-    listeners = []
+    servers = []
     for arg in args.listen:
         listen_host, listen_port, max_connections = validate_listen_arg(arg)
-        listener = Listener(listen_host, listen_port, max_connections)
-        listeners.append(listener)
+        server = SocketServer(listen_host, listen_port, max_connections)
+        servers.append(server)
         log.info("Listening on %s:%d (max_connections:%d)",
                  listen_host, listen_port, max_connections)
 
-    callers = []
+    clients = []
     for arg in args.remote:
         host, port, auto_reconnect = validate_remote_arg(arg)
-        caller = Caller(host, port, auto_reconnect)
-        callers.append(caller)
+        client = SocketClient(host, port, auto_reconnect)
+        clients.append(client)
         msg = "Establishing outbound connection to %s:%d (auto_reconnect:%s)"
         log.info(msg, host, port, auto_reconnect)
 
@@ -488,8 +477,8 @@ def main(args):
         while keep_running:
             time.sleep(.1)
 
-            select_sockets = flatten([l.sockets() for l in listeners])
-            select_sockets += flatten([c.sockets for c in callers])
+            select_sockets = flatten([l.sockets() for l in servers])
+            select_sockets += flatten([c.sockets for c in clients])
             if not select_sockets:
                 time.sleep(select_timeout)
                 log.debug('continue')
@@ -501,14 +490,14 @@ def main(args):
                                                   select_timeout)
             for sock in rlist:
                 data = None
-                for item in listeners + callers:
+                for item in servers + clients:
                     data = item.handle_readable(sock)
                     if data:
                         break
 
                 if data:
                     # Distribute received data to all other connections
-                    for item in listeners + callers:
+                    for item in servers + clients:
                         item.distribute(data)
 
                     hex_logger.log(data, sock)
@@ -518,7 +507,7 @@ def main(args):
 
     except KeyboardInterrupt:
         # Shut down socket connections and threads
-        for item in callers + listeners:
+        for item in clients + servers:
             item.shutdown()
 
 def parse_args():
