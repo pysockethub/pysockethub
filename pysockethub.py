@@ -8,12 +8,12 @@ Features:
         x Multiple outgoing connections are supported.
         x auto_reconnect will attempt to reconnect on a disconnection
         x Option for reconnect delay - adaptive vs. fixed
-    - Option to enable logging
-        Multiple formats are supported:
-            raw: binary, all data as it arrives goes into a file
-            frames: binary, but has a frame with some header information indicating the source of the data
-            hex: similar to frames but header is in readable ascii and data is in hex
-            plugin: calls user-supplied function (specify plugin module name on cmdline)
+    x Option to enable logging
+    - Option to specify log format
+        x raw: binary, all data as it arrives goes into a file
+        x frames: binary, but has a frame with some header information indicating the source of the data
+        - hex: similar to frames but header is in readable ascii and data is in hex
+        - plugin: calls user-supplied function (specify plugin module name on cmdline)
     x Option to enable debug output to screen with hex or ascii + timestamps
     x Option to output summary stats table at fixed rate
     - Option to restrict incoming connections by IP range (whitelist / blacklist)
@@ -35,6 +35,7 @@ todo:
     - mention socat / netcat in docs (http://www.dest-unreach.org/socat/)
     - add .reg file for windows users
     - ability to make some connections recv only (don't accept any data from the remote side)
+    - installer - adds to python scripts path
 
 """
 
@@ -493,6 +494,9 @@ class RawLogger:
 class FrameLogger:
     """
     Logger that writes frames with sync, header, and data.
+
+    Format of frame is:
+    <sync:2> <time:4> <addr_len:4> <addr:addr_len> <port:2> <data_len:4> <data:data_len>
     """
     def __init__(self, outfilename):
         self.outfilename = outfilename
@@ -503,8 +507,7 @@ class FrameLogger:
             self.logfile = open(self.outfilename, 'wb')
             log.info("Opened '%s' for logging (logfmt=frames)", self.outfilename)
 
-        # Log a frame to disk.  Format of frame in bytes is:
-        # <sync:2> <time:4> <addr_len:4> <addr:addr_len> <port:2> <data_len:4> <data:data_len>
+        # Create a frame
         self.logfile.write(b'\xEB\x90')                   # Frame sync
         now = int(time.time())
         self.logfile.write(struct.pack('>I', now))        # Time data was received
@@ -513,11 +516,14 @@ class FrameLogger:
         self.logfile.write(addr.encode())                 # addr
         self.logfile.write(struct.pack('>H', port))       # Port number
         self.logfile.write(struct.pack('>I', len(data)))  # Length of data
-        self.logfile.write(data)
+        self.logfile.write(data)                          # Received data
 
 class HexLogger:
     """
-    Logger that writes hexdump-formatted data.
+    Logger that writes hexdump-formatted data.  E.g.:
+
+    2021-11-14 20:01:50.958 127.0.0.1:60910:
+        00000000: 6C 6B 6A 0D 0A                                    lkj..
     """
     def __init__(self, outfilename):
         self.outfilename = outfilename
@@ -525,11 +531,26 @@ class HexLogger:
 
     def log(self, sock, data):
         if self.logfile is None:
-            self.logfile = open(self.outfilename, 'wb')
+            self.logfile = open(self.outfilename, 'w')
             log.info("Opened '%s' for logging (logfmt=hexdump)", self.outfilename)
 
-        # self.logfile.write(data)
+        # Generate timestamp
+        now = time.time()
+        time_str = time.strftime('%Y-%m-%d %H:%M:%S.',
+                                 time.localtime(now))
+        # Tack on subseconds
+        subsec = now - int(now)
+        msec = int(subsec * 1000)
+        time_str += f'{msec:03d} '
 
+        # Tack on sender host and port
+        self.logfile.write(time_str)
+        addr, port = sock.getpeername()
+        self.logfile.write(f'{addr}:{port}:\n')
+
+        # Finally, output an indented hexdump of the data
+        for line in hexdump.hexdump(data, result='generator'):
+            self.logfile.write('\t' + line + '\n')
 
 def get_logger(args):
     if args.logfilename:
@@ -540,6 +561,8 @@ def get_logger(args):
         elif args.logfmt == 'hexdump':
             return HexLogger(args.logfilename)
 
+    # Main always calls logger.log(), so we supply a do-nothing logger if
+    # logging isn't enabled.
     class DummyLogger:
         def log(self, sock, data):
             pass
