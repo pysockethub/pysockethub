@@ -14,8 +14,8 @@ Features:
             frames: binary, but has a frame with some header information indicating the source of the data
             hex: similar to frames but header is in readable ascii and data is in hex
             plugin: calls user-supplied function (specify plugin module name on cmdline)
-    - Option to enable debug output to screen with hex or ascii + timestamps
-    - Option to output summary stats table at fixed rate or on activity (with rate limiting)
+    x Option to enable debug output to screen with hex or ascii + timestamps
+    x Option to output summary stats table at fixed rate
     - Option to restrict incoming connections by IP range (whitelist / blacklist)
 
     - Support "plugin" for binary logging formats: calls fn with (host, port,
@@ -53,6 +53,7 @@ import time
 
 # Third-party imports
 import hexdump
+import prettytable
 
 # Local imports
 import ansicolor
@@ -152,12 +153,12 @@ def validate_remote_arg(arg):
 
     return host, port, auto_reconnect
 
-
 class SocketServer:
-    def __init__(self, host, port, max_connections):
+    def __init__(self, host, port, max_connections, stats_table):
         self.host = host
         self.port = port
         self.max_connections = max_connections
+        self.stats_table = stats_table
         self.connected_sockets = []
         self.last_readable = None
         self.listen_socket = None
@@ -197,7 +198,7 @@ class SocketServer:
             return [self.listen_socket] + self.connected_sockets
         return self.connected_sockets
 
-    def handle_readable(self, sock):
+    def recv(self, sock):
         data = None
 
         if not sock in self:
@@ -243,6 +244,8 @@ class SocketServer:
                 log.info("Client disconnected (%s:%d)", addr, port)
                 self._remove_connected_socket(sock)
 
+            self.stats_table.update_rx(sock, len(data))
+
         return data
 
     def _remove_connected_socket(self, sock):
@@ -253,10 +256,11 @@ class SocketServer:
         # if len(self.connected_sockets) < self.max_connections:
             self._create_listen_socket()
 
-    def distribute(self, data):
+    def send(self, data):
         for sock in self.connected_sockets:
             if sock is not self.last_readable:
                 sock.send(data)
+                self.stats_table.update_tx(sock, len(data))
         self.last_readable = None
 
 
@@ -275,9 +279,10 @@ def flatten(lst):
     return [item for sublist in lst for item in sublist]
 
 class SocketClient:
-    def __init__(self, host, port, auto_reconnect=True):
+    def __init__(self, host, port, stats_table, auto_reconnect=True):
         self.host = host
         self.port = port
+        self.stats_table = stats_table
         self.auto_reconnect = auto_reconnect
         self.sockets = []  # Holds one socket when connected; otherwise empty.
         self.last_readable = None
@@ -328,7 +333,7 @@ class SocketClient:
         if self.sockets:
             self.sockets[0].close()
 
-    def handle_readable(self, sock):
+    def recv(self, sock):
         if not sock in self.sockets:
             return None
 
@@ -366,23 +371,23 @@ class SocketClient:
                 self._connect()
             return None
 
+        self.stats_table.update_rx(sock, len(data))
+
         return data
 
-    def distribute(self, data):
+    def send(self, data):
         if self.sockets:
             if self.sockets[0] is not self.last_readable:
                 self.sockets[0].send(data)
+                self.stats_table.update_tx(self.sockets[0], len(data))
         self.last_readable = None
 
 class HexdumpPrinter:
-    def __init__(self, args):
+    def __init__(self):
         self.sock_to_color_map = {}
         self.args = args
-        self.enabled = args.statusfmt == 'hexdump'
 
-    def update(self, data, sock):
-        if not self.enabled:
-            return
+    def show(self, data, sock):
         try:
             color = self.sock_to_color_map[sock]
         except KeyError:
@@ -396,47 +401,47 @@ class HexdumpPrinter:
         log.info("Received %d bytes from %s:%d:\n%s",
                  len(data), addr, port, hdump)
 
-class TablePrinter:
-    def __init__(self, args):
+class SocketStatsTable:
+    def __init__(self):
         self.sock_to_color_map = {}
-        self.sock_rx_bytes = collections.defaultdict(int)
+        self.tx_bytes = collections.defaultdict(int)
+        self.rx_bytes = collections.defaultdict(int)
+        self.last_rx_time = {}
         self.args = args
-        self.last_dt = datetime.datetime(1900, 1, 1, 0, 0, 0)
-        self.max_dt = datetime.timedelta(seconds=1)
-        self.enabled = args.statusfmt == 'table'
+        self.last_show_time = 0
+        self.show_delay = 1
+        self.awaiting_flag = False
 
-    def update(self, data, sock):
-        if not self.enabled:
-            return
+    def update_tx(self, sock, length):
+        self.tx_bytes[sock] += length
 
-        self.sock_rx_bytes[sock] += len(data)
-
+    def update_rx(self, sock, length):
+        self.rx_bytes[sock] += length
+        self.last_rx_time[sock] = time.time()
 
     def show(self, sockets):
-        if not self.enabled:
-            return
-        now = datetime.datetime.now()
-        if not (now - self.last_dt) > self.max_dt:
+        now = time.time()
+        if (now - self.last_show_time) < self.show_delay:
             return
 
-        self.last_dt = now
+        self.last_show_time = now
 
         lines = []
-        # all_socks = list(set(sockets + list(self.sock_rx_bytes.keys())))
-        # for sock in all_socks:
+
         for sock in sockets:
-        # for sock, rx_bytes in self.sock_rx_bytes.items():
-            try:
-                rx_bytes = self.sock_rx_bytes[sock]
-            except KeyError:
-                rx_bytes = 0
-
-            connected = sock in sockets
-
             try:
                 addr, port = sock.getpeername()
             except OSError:
+                # Socket was a listening socket, not a remote connection
                 continue
+
+            try:
+                idle_sec = int(now - self.last_rx_time[sock])
+            except KeyError:
+                self.last_rx_time[sock] = now
+                idle_sec = 0
+
+            # connected = sock in sockets
 
             try:
                 color = self.sock_to_color_map[sock]
@@ -445,15 +450,28 @@ class TablePrinter:
                 self.sock_to_color_map[sock] = color
 
             if self.args.color:
-                line = f'{getattr(ansicolor.fore, color)}{addr}:{port}\t{rx_bytes}\t{connected}{ansicolor.style.RESET}'
+                # line = f'{getattr(ansicolor.fore, color)}{addr}:{port}\t{rx_bytes}\t{connected}{ansicolor.style.RESET}'
+                line = [f'{getattr(ansicolor.fore, color)}{addr}', port,
+                        self.tx_bytes[sock],
+                        self.rx_bytes[sock],
+                        # f'{(now - self.last_rx_time[sock]).total_seconds()}{ansicolor.style.RESET}']
+                        f'{idle_sec}{ansicolor.style.RESET}']
             else:
-                line = f'{addr}:{port}\t{rx_bytes}\t{connected}'
+                # line = f'{addr}:{port}\t{rx_bytes}\t{connected}'
+                line = [addr, port, self.tx_bytes[sock], self.rx_bytes[sock], idle_sec]
             lines.append(line)
 
         if lines:
-            log.info('%s', '\n' + "\n".join(lines))
+            table = prettytable.PrettyTable()
+            table.field_names = ['addr', 'port', 'tx_bytes', 'rx_bytes', 'rx_idle_sec']
+            table.add_rows(lines)
+            # log.info('%s', '\n' + "\n".join(lines))
+            log.info('%s', '\n' + table.get_string())
+            self.awaiting_flag = False
         else:
-            log.info("Awaiting connections...")
+            if not self.awaiting_flag:
+                log.info("Not showing statistics until connections established.")
+                self.awaiting_flag = True
 
 class BinLogger:
     """
@@ -485,21 +503,23 @@ class BinFrameLogger:
         self.logfile.write(data)
 
 def main(args):
-    hex_printer = HexdumpPrinter(args)
-    table_printer = TablePrinter(args)
+    hex_printer = HexdumpPrinter()
+    stats_table = SocketStatsTable()
+    show_hex = args.statusfmt == 'hexdump'
+    show_table = args.statusfmt == 'table'
 
     servers = []
-    for arg in args.serve:
+    for arg in args.local:
         listen_host, listen_port, max_connections = validate_listen_arg(arg)
-        server = SocketServer(listen_host, listen_port, max_connections)
+        server = SocketServer(listen_host, listen_port, max_connections, stats_table)
         servers.append(server)
         log.info("Serving on %s:%d (max_connections:%d)",
                  listen_host, listen_port, max_connections)
 
     clients = []
-    for arg in args.client:
+    for arg in args.remote:
         host, port, auto_reconnect = validate_remote_arg(arg)
-        client = SocketClient(host, port, auto_reconnect)
+        client = SocketClient(host, port, stats_table, auto_reconnect)
         clients.append(client)
         msg = "Connecting to %s:%d (auto_reconnect:%s)"
         log.info(msg, host, port, auto_reconnect)
@@ -524,19 +544,20 @@ def main(args):
             for sock in rlist:
                 data = None
                 for item in servers + clients:
-                    data = item.handle_readable(sock)
+                    data = item.recv(sock)
                     if data:
                         break
 
                 if data:
                     # Distribute received data to all other connections
                     for item in servers + clients:
-                        item.distribute(data)
+                        item.send(data)
 
-                    hex_printer.update(data, sock)
-                    table_printer.update(data, sock)
+                    if show_hex:
+                        hex_printer.show(data, sock)
 
-            table_printer.show(select_sockets)
+            if show_table:
+                stats_table.show(select_sockets)
 
     except KeyboardInterrupt:
         # Shut down socket connections and threads
@@ -556,12 +577,12 @@ def parse_args():
 
     help_msg = "Local interface and port to serve connections on.  host:port[:max_connections]."
     help_msg += "  Option may be specified multiple times."
-    group.add_argument("-s", "--serve", action='append', default=[],
+    group.add_argument("-l", "--local", action='append', default=[],
                        help=help_msg)
 
     help_msg = "Remote host to connect to.  host:port[:auto_reconnect] auto_reconnect:true/false."
     help_msg += "  Option may be specified multiple times."
-    group.add_argument("-c", "--client", action='append', default=[],
+    group.add_argument("-r", "--remote", action='append', default=[],
                        help=help_msg)
 
     parser.add_argument("--status", default='True',
