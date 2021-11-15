@@ -26,6 +26,8 @@ tests:
     - hostnames vs. IPs (particularly in the binary loggers that include this info)
 
 todo:
+    - consider distributing frames, not bytes
+        Could be done in service_readable() by passing recv'd data to a class that does frame sync
     - option for timestamp in log filename
     - docstrings
     - diagrams
@@ -33,7 +35,7 @@ todo:
     - mention socat / netcat in docs (http://www.dest-unreach.org/socat/)
     - add .reg file for windows users
     - ability to make some connections recv only (don't accept any data from the remote side)
-    - installer - adds to python scripts path
+    - pip installer - adds to python scripts path
 
 """
 
