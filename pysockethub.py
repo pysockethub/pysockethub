@@ -198,7 +198,7 @@ class SocketServer:
             return [self.listen_socket] + self.connected_sockets
         return self.connected_sockets
 
-    def recv(self, sock):
+    def service_readable(self, sock):
         data = None
 
         if not sock in self:
@@ -256,7 +256,7 @@ class SocketServer:
         # if len(self.connected_sockets) < self.max_connections:
             self._create_listen_socket()
 
-    def send(self, data):
+    def distribute(self, data):
         for sock in self.connected_sockets:
             if sock is not self.last_readable:
                 sock.send(data)
@@ -333,7 +333,7 @@ class SocketClient:
         if self.sockets:
             self.sockets[0].close()
 
-    def recv(self, sock):
+    def service_readable(self, sock):
         if not sock in self.sockets:
             return None
 
@@ -375,7 +375,7 @@ class SocketClient:
 
         return data
 
-    def send(self, data):
+    def distribute(self, data):
         if self.sockets:
             if self.sockets[0] is not self.last_readable:
                 self.sockets[0].send(data)
@@ -625,12 +625,15 @@ def main(args):
         while keep_running:
             time.sleep(.1)
 
+            # Build a list of all the sockets to be waited on with select()
             select_sockets = flatten([l.sockets() for l in servers])
             select_sockets += flatten([c.sockets for c in clients])
             if not select_sockets:
                 time.sleep(select_timeout)
                 continue
 
+            # Wait for some data to arrive, or for a client to connect to one
+            # of our listening sockets.
             rlist, _wlist, _xlist = select.select(select_sockets,
                                                   [],
                                                   [],
@@ -638,14 +641,14 @@ def main(args):
             for sock in rlist:
                 data = None
                 for item in servers + clients:
-                    data = item.recv(sock)
+                    data = item.service_readable(sock)
                     if data:
                         break
 
                 if data:
                     # Distribute received data to all other connections
                     for item in servers + clients:
-                        item.send(data)
+                        item.distribute(data)
 
                     logger.log(sock, data)
 
