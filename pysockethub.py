@@ -9,26 +9,24 @@ Features:
         x auto_reconnect will attempt to reconnect on a disconnection
         x Option for reconnect delay - adaptive vs. fixed
     x Option to enable logging
-    - Option to specify log format
+    x Option to specify log format
         x raw: binary, all data as it arrives goes into a file
         x frames: binary, but has a frame with some header information indicating the source of the data
-        - hex: similar to frames but header is in readable ascii and data is in hex
-        - plugin: calls user-supplied function (specify plugin module name on cmdline)
+        x hex: similar to frames but header is in readable ascii and data is in hex
+        x plugin: calls user-supplied function (specify plugin module name on cmdline)
     x Option to enable debug output to screen with hex or ascii + timestamps
     x Option to output summary stats table at fixed rate
     - Option to restrict incoming connections by IP range (whitelist / blacklist)
-
-    - Support "plugin" for binary logging formats: calls fn with (host, port,
-      data).  Allows stateful parsing of data streams for frame
-      synchronization, etc.
+    - Option to make connections recv only (no tx)
 
 tests:
+    - plugin path resolution (may need to add option to specify path to plugin module?)
     - What happens when remote end doesn't recv
     - Correctly handle loopback (not allowed) - client <-> server = error
     - hostnames vs. IPs (particularly in the binary loggers that include this info)
 
 todo:
-    - add logging to file
+    - option for timestamp in log filename
     - docstrings
     - diagrams
     - logo
@@ -42,16 +40,16 @@ todo:
 # System imports
 import argparse
 import collections
-import datetime
+import importlib
 import logging
-import platform
-import queue
+import pkgutil
 import select
 import socket
 import struct
 import sys
 import threading
 import time
+
 
 # Third-party imports
 import hexdump
@@ -472,7 +470,7 @@ class SocketStatsTable:
             self.awaiting_flag = False
         else:
             if not self.awaiting_flag:
-                log.info("Not showing statistics until connections established.")
+                log.info("Not showing statistics until connection established.")
                 self.awaiting_flag = True
 
 class RawLogger:
@@ -554,15 +552,42 @@ class HexLogger:
 
 def get_logger(args):
     if args.logfilename:
+        # Logging to file is enabled.
+
+        if args.logplugin:
+            # User specified a custom logger via plugin.
+
+            # Build a dictionary of available plugins.  (Plugins are python
+            # modules with names that start with psh_)
+            discovered_plugins = {
+                name: importlib.import_module(name)
+                for finder, name, ispkg
+                in pkgutil.iter_modules()
+                if name.startswith('psh_')
+            }
+
+            log.info("Available plugins: %r", ', '.join(discovered_plugins.keys()))
+
+            # Verify that the module has a log() function.
+            plugin_module = discovered_plugins['psh_' + args.logplugin]
+            plugin_module.LOGFILENAME = args.logfilename
+            if not hasattr(plugin_module, 'log'):
+                log.error("Plugin %s has no log() function.", args.logplugin)
+                sys.exit(1)
+
+            return plugin_module
+
+
+        # No plugin; just use one of the default file loggers.
         if args.logfmt == 'raw':
             return RawLogger(args.logfilename)
-        elif args.logfmt == 'frames':
+        if args.logfmt == 'frames':
             return FrameLogger(args.logfilename)
-        elif args.logfmt == 'hexdump':
+        if args.logfmt == 'hexdump':
             return HexLogger(args.logfilename)
 
-    # Main always calls logger.log(), so we supply a do-nothing logger if
-    # logging isn't enabled.
+    # Logging to file is not enabled.  Main always calls logger.log(), so we
+    # supply a do-nothing logger in this case.
     class DummyLogger:
         def log(self, sock, data):
             pass
@@ -646,13 +671,13 @@ def parse_args():
     # Create a group so that we can require at least one --listen or --remote arg
     group = parser.add_mutually_exclusive_group(required=True)
 
-    help_msg = "Local interface and port to serve connections on.  host:port[:max_connections]."
-    help_msg += "  Option may be specified multiple times."
+    help_msg = ("Local interface and port to serve connections on.  host:port[:max_connections]. \
+                Option may be specified multiple times.")
     group.add_argument("-l", "--local", action='append', default=[],
                        help=help_msg)
 
-    help_msg = "Remote host to connect to.  host:port[:auto_reconnect] auto_reconnect:true/false."
-    help_msg += "  Option may be specified multiple times."
+    help_msg = ("Remote host to connect to.  host:port[:auto_reconnect] auto_reconnect:true/false. \
+                 Option may be specified multiple times.")
     group.add_argument("-r", "--remote", action='append', default=[],
                        help=help_msg)
 
@@ -668,9 +693,16 @@ def parse_args():
     parser.add_argument("-o", "--logfilename", default=None,
                         help="Output filename for logging")
 
-    parser.add_argument("--logfmt", default='raw', choices=['raw', 'frames', 'hexdump'],
-                       help="Log file format.")
 
+    log_group = parser.add_mutually_exclusive_group(required=False)
+
+    log_group.add_argument("--logfmt", default='raw', choices=['raw', 'frames', 'hexdump'],
+                           help="Log file format.")
+
+    help_msg = ("Plugin name.  A python module named psh_<name> containing a log(sock, data) \
+                function.")
+    log_group.add_argument("--logplugin",
+                           help=help_msg)
 
     args = parser.parse_args()
 
