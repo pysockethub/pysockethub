@@ -47,6 +47,7 @@ import platform
 import queue
 import select
 import socket
+import struct
 import sys
 import threading
 import time
@@ -387,7 +388,7 @@ class HexdumpPrinter:
         self.sock_to_color_map = {}
         self.args = args
 
-    def show(self, data, sock):
+    def show(self, sock, data):
         try:
             color = self.sock_to_color_map[sock]
         except KeyError:
@@ -473,7 +474,7 @@ class SocketStatsTable:
                 log.info("Not showing statistics until connections established.")
                 self.awaiting_flag = True
 
-class BinLogger:
+class RawLogger:
     """
     Logger that writes bytes straight to disk as they arrive.
     No additional metadata is stored in the file.
@@ -485,12 +486,13 @@ class BinLogger:
     def log(self, sock, data):
         if self.logfile is None:
             self.logfile = open(self.outfilename, 'wb')
+            log.info("Opened '%s' for logging (logfmt=raw)", self.outfilename)
 
         self.logfile.write(data)
 
-class BinFrameLogger:
+class FrameLogger:
     """
-    Logger that writes bytes
+    Logger that writes frames with sync, header, and data.
     """
     def __init__(self, outfilename):
         self.outfilename = outfilename
@@ -499,14 +501,58 @@ class BinFrameLogger:
     def log(self, sock, data):
         if self.logfile is None:
             self.logfile = open(self.outfilename, 'wb')
+            log.info("Opened '%s' for logging (logfmt=frames)", self.outfilename)
 
+        # Log a frame to disk.  Format of frame in bytes is:
+        # <sync:2> <time:4> <addr_len:4> <addr:addr_len> <port:2> <data_len:4> <data:data_len>
+        self.logfile.write(b'\xEB\x90')                   # Frame sync
+        now = int(time.time())
+        self.logfile.write(struct.pack('>I', now))        # Time data was received
+        addr, port = sock.getpeername()
+        self.logfile.write(struct.pack('>I', len(addr)))  # Length of addr string
+        self.logfile.write(addr.encode())                 # addr
+        self.logfile.write(struct.pack('>H', port))       # Port number
+        self.logfile.write(struct.pack('>I', len(data)))  # Length of data
         self.logfile.write(data)
+
+class HexLogger:
+    """
+    Logger that writes hexdump-formatted data.
+    """
+    def __init__(self, outfilename):
+        self.outfilename = outfilename
+        self.logfile = None
+
+    def log(self, sock, data):
+        if self.logfile is None:
+            self.logfile = open(self.outfilename, 'wb')
+            log.info("Opened '%s' for logging (logfmt=hexdump)", self.outfilename)
+
+        # self.logfile.write(data)
+
+
+def get_logger(args):
+    if args.logfilename:
+        if args.logfmt == 'raw':
+            return RawLogger(args.logfilename)
+        elif args.logfmt == 'frames':
+            return FrameLogger(args.logfilename)
+        elif args.logfmt == 'hexdump':
+            return HexLogger(args.logfilename)
+
+    class DummyLogger:
+        def log(self, sock, data):
+            pass
+
+    return DummyLogger()
 
 def main(args):
     hex_printer = HexdumpPrinter()
     stats_table = SocketStatsTable()
     show_hex = args.statusfmt == 'hexdump'
     show_table = args.statusfmt == 'table'
+
+    logger = get_logger(args)
 
     servers = []
     for arg in args.local:
@@ -553,8 +599,10 @@ def main(args):
                     for item in servers + clients:
                         item.send(data)
 
+                    logger.log(sock, data)
+
                     if show_hex:
-                        hex_printer.show(data, sock)
+                        hex_printer.show(sock, data)
 
             if show_table:
                 stats_table.show(select_sockets)
@@ -593,6 +641,13 @@ def parse_args():
 
     parser.add_argument("--color", default='True',
                         help="Enable colored output")
+
+    parser.add_argument("-o", "--logfilename", default=None,
+                        help="Output filename for logging")
+
+    parser.add_argument("--logfmt", default='raw', choices=['raw', 'frames', 'hexdump'],
+                       help="Log file format.")
+
 
     args = parser.parse_args()
 
