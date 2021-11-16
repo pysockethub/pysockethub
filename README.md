@@ -1,15 +1,15 @@
 # pysockethub
 
-[](/img/logo_arrows.png)
+![logo_arrows](/img/logo_arrows.png)
 
-Distributes data received on one socket to all other connected sockets.
+Distributes data received on any socket to all other connected sockets.
 
-Supports multiple inbound and outbound sockets.
+Supports an arbitrary number of inbound and outbound socket connections, logging to disk in multiple formats, a tabular status display, hexdump display, and colorized logging.
 
 Example usage:
 
 Listen on port 1234 for up to 10 incoming connections:
- - `python pysockethub.py -l 0.0.0.0:1234`
+ - `python pysockethub.py -l 0.0.0.0:1234`  (10 connections is the default maximum)
 
 Listen on port 1234 for up to 2 connections and port 2345 for up to 3 connections:
  - `python pysockethub.py -l 0.0.0.0:1234:2 -l 0.0.0.0:2345:3`
