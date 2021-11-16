@@ -1,4 +1,5 @@
 """
+pysockethub - Distributes data received on one socket to all other connected sockets.
 
 Features:
     x Option to specify host:port[:max_connections] to listen on.
