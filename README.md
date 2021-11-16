@@ -1,5 +1,7 @@
 # pysockethub
 
+[](/img/logo_arrows.png)
+
 Distributes data received on one socket to all other connected sockets.
 
 Supports multiple inbound and outbound sockets.
