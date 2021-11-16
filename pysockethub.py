@@ -28,7 +28,6 @@ tests:
 todo:
     - consider distributing frames, not bytes
         Could be done in service_readable() by passing recv'd data to a class that does frame sync
-    - option for timestamp in log filename
     - docstrings
     - diagrams
     - logo
@@ -44,6 +43,7 @@ import argparse
 import collections
 import importlib
 import logging
+import os
 import pkgutil
 import select
 import socket
@@ -554,6 +554,16 @@ class HexLogger:
 
 def get_logger(args):
     if args.logfilename:
+
+        if args.timestamp:
+            head, filename = os.path.split(args.logfilename)
+            now = time.time()
+            time_str = time.strftime('%Y%m%d_%H%M%S_',
+                                     time.localtime(now))
+            logfilename = os.path.join(head, time_str + filename)
+        else:
+            logfilename = args.logfilename
+
         # Logging to file is enabled.
 
         if args.logplugin:
@@ -572,7 +582,7 @@ def get_logger(args):
 
             # Verify that the module has a log() function.
             plugin_module = discovered_plugins['psh_' + args.logplugin]
-            plugin_module.LOGFILENAME = args.logfilename
+            plugin_module.LOGFILENAME = logfilename
             if not hasattr(plugin_module, 'log'):
                 log.error("Plugin %s has no log() function.", args.logplugin)
                 sys.exit(1)
@@ -582,11 +592,11 @@ def get_logger(args):
 
         # No plugin; just use one of the default file loggers.
         if args.logfmt == 'raw':
-            return RawLogger(args.logfilename)
+            return RawLogger(logfilename)
         if args.logfmt == 'frames':
-            return FrameLogger(args.logfilename)
+            return FrameLogger(logfilename)
         if args.logfmt == 'hexdump':
-            return HexLogger(args.logfilename)
+            return HexLogger(logfilename)
 
     # Logging to file is not enabled.  Main always calls logger.log(), so we
     # supply a do-nothing logger in this case.
@@ -698,6 +708,8 @@ def parse_args():
     parser.add_argument("-o", "--logfilename", default=None,
                         help="Output filename for logging")
 
+    parser.add_argument("-t", "--timestamp", default='True',
+                        help="If True, filenames will be prepended with yyyymmdd_hhmmss_")
 
     log_group = parser.add_mutually_exclusive_group(required=False)
 
@@ -714,6 +726,7 @@ def parse_args():
     # Convert the bool arg strings to bool
     args.log = validate_bool(args.status)
     args.color = validate_bool(args.color)
+    args.timestamp = validate_bool(args.timestamp)
 
     return args
 
