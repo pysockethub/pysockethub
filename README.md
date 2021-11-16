@@ -6,6 +6,11 @@ Distributes data received on any socket to all other connected sockets.
 
 Supports an arbitrary number of inbound and outbound socket connections, logging to disk in multiple formats, a tabular status display, hexdump display, and colorized logging.
 
+![logo_arrows](/img/table.png)
+
+![logo_arrows](/img/hexdump.png)
+
+
 Example usage:
 
 Listen on port 1234 for up to 10 incoming connections:
